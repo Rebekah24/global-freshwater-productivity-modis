@@ -75,9 +75,7 @@ This workflow generates global maps of:
 
 These outputs are summarized spatially within freshwater plant species richness grid cells and can be used for ecological interpretation and further modelling.
 
-You can place selected figures in the `figures/` folder and display them here, for example:
-
-figures/example_map.png)
+figures/example_map.png
 
 ## Tools and packages
 
