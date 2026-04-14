@@ -1,0 +1,915 @@
+---
+title: "Quantifying Freshwater Productivity at Global Scale: A MODIS Workflow with Water-Masked NDVI and NDAVI"
+output:
+  html_document:
+    toc: true
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+    fig_caption: true
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## **Motivation**
+
+This document describes a geospatial workflow for quantifying aquatic primary productivity in global river and lake systems using satellite-derived vegetation indices as proxies. NDVI and NDAVI are computed from MODIS reflectance data and integrated with global hydrographic and freshwater vegetation species richness layers through Google Earth Engine to produce spatially explicit productivity metrics at 500 m resolution, suitable for ecological research on the productivity–species richness relationship in freshwater systems. The methodological contribution is the implementation of water masking to address the mixed pixel problem inherent in moderate-resolution satellite imagery, ensuring that the vegetation signal reflects aquatic rather than terrestrial vegetation.
+
+## **1. Overview and Rationale**
+
+### 1.1 Scientific Context
+
+Aquatic vegetation in river systems serves as a critical indicator of ecosystem health and biodiversity. Our analysis quantifies vegetation productivity using two complementary indices:
+
+-   **NDVI (Normalized Difference Vegetation Index)**: Standard vegetation greenness indicator
+
+-   **NDAVI (Normalized Difference Aquatic Vegetation Index)**: Specialized index optimized for detecting vegetation in aquatic environments
+
+### 1.2 Workflow Robustness
+
+The workflow implements several key features ensuring data quality and reproducibility:
+
+-   Automated cloud-based processing through Google Earth Engine
+
+-   Standardized spatial resolution (500m) for consistent analysis
+
+-   Water masking to address mixed pixel issue
+
+-   Quality control through conservative thresholding and best-effort processing
+
+## **2. Data Sources and Inputs**
+
+### 2.1 Primary Data Sources
+
+-   **Satellite Imagery**: Annual composites from 2024 (January 1 - December 31)
+    -   Source: **MCD43A4**
+    -   Temporal coverage: Full annual cycle to capture seasonal variations
+-   **Global River Data** (`rivers_ee`)
+    -   Filtered vector dataset of global river segments
+    -   Contains unique river identifiers such as:
+        -   `HYRIV_ID`: Unique river identifier
+        -   `MAIN_RIV`: Main river name
+        -   `RIVER_SEGMENT_ID`: Segment identifier
+-   **Global_LAKES_polys_v10_shp (** `lake_ee` )
+    -   Polygons dataset of global lakes
+-   **Global_fwplant_richness** (`richness_ee`)
+    -   `Grid_ID:` Unique identifier for each cell
+    -   `latitude/longitude`: Cell center coordinates
+    -   `Fwplant_ri`i: Number of freshwater plant species
+-   **Water Mask** (`water_mask`)
+    -   Source: **MOD44W_061**
+    -   Binary classification of water vs. non-water pixels
+    -   Resampled from native resolution (250m) to 500m using mean aggregation
+    -   Please refer to 2024_MODIS_water_mask.R file to see how water mask is generated
+
+### 2.2 Why use MCD43A4 Product?
+
+#### The Angular Problem in Satellite Remote Sensing
+
+When satellites observe Earth's surface, they only look straight down at the center of their swath, but view at increasing angles toward the swath edges. For example, The MODIS Terra and Aqua satellites scan across a wide swath (±55° from nadir), meaning the same location can be viewed from different angles on different days. Sun angle also varies dramatically with latitude and seasons. For example, the sun positions nearly overhead at the equator year-round, but low angles at poles, especially in winter. Together, these viewing and sun angle variations cause surface reflectance to change systematically. Therefore, using MODIS Terra/Aqua datasets has the problem that **the same vegetation can appear 20-60% darker or brighter depending on the viewing angle**, leading to mistaken data for the real vegetation differences in global studies.
+
+#### How MCD43A4 Product Solves This?
+
+The full name of MCD43A4 product is MCD43A4 **Nadir BRDF-Adjusted Reflectance (NBAR)**. It removes these angular effects using a **BRDF (Bidirectional Reflectance Distribution Function) model**, which mathematically corrects how surfaces appear different from various viewing angles. Moreover, **MCD43A4 product combines observations from both Terra (10:30 AM equator overpass) and Aqua (1:30 PM equator overpass) satellites**. Therefore, all viewing angles are standardized to better characterize surface properties, and all measurements of the MODIS spectral bands (1-7) are normalized to solar noon time condition. This ensures fair comparisons across different locations and times, eliminating the misleading brightness variations caused by satellite viewing geometry.
+
+The process:
+
+1.  **Collect 16 days of observations** from multiple angles
+
+2.  **Fit a BRDF model** that describes how reflectance changes with angles
+
+3.  **Use the model to predict** reflectance at nadir view and standard sun angle
+
+4.  **Output daily estimates** with angular effects removed
+
+#### The MCD43A4 Data Product Structure
+
+-   **Spatial Resolution**: 500 m
+
+-   **Projection**: Sinusoidal
+
+-   **Temporal Resolution**: Daily (derived from 16-day window)
+
+-   **Temporal weighting**: Center-weighted (day 8 gets highest weight)
+
+For example, the "daily" value for January 8th actually incorporates data from January 1-16, with January 8th weighted most heavily.
+
+-   **Valid range**: 0-32766
+
+-   **Scale factor**: 0.0001
+
+## **3. Processing Workflow**
+
+### 3.1 Spatial Resolution Standardization
+
+All processing in this workflow is performed at a common spatial resolution of 500 m. This resolution is shared across the three input layers:
+
+-   **MCD43A4 vegetation index composite**: 500 m is the native resolution of the product
+
+-   **Species richness grid**: 500 m matches the spacing of the grid cells used as the analytical unit
+
+-   **MOD44W water mask**: resampled from its native 250 m to 500 m using mean aggregation, as developed in Section 4.2
+
+Standardizing on a single resolution ensures pixel-level alignment across layers and makes statistical reductions consistent across the full set of inputs.
+
+### 3.2 Vegetation Index Calculation
+
+#### Annual NDVI and NDAVI
+
+``` r
+calculate_ndvi(start_date, end_date)
+calculate_ndavi(start_date, end_date)
+```
+
+**Inputs:**
+
+-   `start_date`: Beginning of time period (e.g., '2024-01-01')
+
+-   `end_date`: End of time period (e.g., '2024-12-31')
+
+**What it does:**
+
+1.  Collect MODIS MCD43A4 images for the defined date range at 500m resolution
+
+2.  Scales reflectance values (MODIS scale factor: 0.0001)
+
+3.  Applies NDVI formula: $$\text{NDVI} = \frac{\text{NIR} - \text{Red}}{\text{NIR} + \text{Red}}$$ for each day image; and
+
+    NDAVI formula: $$\text{NDAVI} = \frac{\text{NIR} - \text{Blue}}{\text{NIR} + \text{Blue}}$$ for each day image
+
+4.  Computes mean NDVI/NDAVI across the specified period (i.e. computes mean NDVI for each pixel across all dates)
+
+5.  Creates a single composite image
+
+6.  Project the value to WGS 84 to match with the species richness grid
+
+**Output:** a single Earth Engine Image containing mean NDVI values for the specified period
+
+#### **Example Code**
+
+``` r
+calculate_ndvi <- function(start_date, end_date) {
+  
+  # Step 1: Load the MCD43A4 collection and filter to the target window
+  modis <- ee$ImageCollection('MODIS/061/MCD43A4')$
+    filter(ee$Filter$date(start_date, end_date))
+  
+  # Step 2-4: Define a helper to compute NDVI for a single image
+  add_ndvi <- function(image) {
+    
+    # Rescale the integer reflectance values to the 0-1 range
+    red <- image$select("Nadir_Reflectance_Band1")$multiply(0.0001)
+    nir <- image$select("Nadir_Reflectance_Band2")$multiply(0.0001)
+    
+    # Apply the standard NDVI formula: (NIR - Red) / (NIR + Red)
+    ndvi <- nir$subtract(red)$divide(nir$add(red))$rename("NDVI")
+    
+    return(image$addBands(ndvi))
+  }
+  
+  # Apply the helper across every image in the collection
+  modis_with_ndvi <- modis$map(add_ndvi)
+  
+  # Step 5: Collapse the time series into a single annual mean
+  annual_ndvi <- modis_with_ndvi$select("NDVI")$mean()
+  
+  # Step 6: Reproject to match the species richness grid
+  annual_ndvi_reproject <- annual_ndvi$reproject(crs   = "EPSG:4326",
+                                                 scale = 500)
+  
+  return(annual_ndvi_reproject)
+}
+```
+
+**Notes:** Reflectance rescaling with the 0.0001 factor. The MCD43A4 product stores reflectance as 16-bit integers for storage efficiency, with a documented scale factor of 0.0001 that must be applied before values are interpreted as physical reflectance on the 0 to 1 range.
+
+### 3.3 Cell-by-Cell Processing: River Example
+
+> The vegetation index composite produced in Section 3.2 provides spatially continuous NDVI and NDAVI values, but ecological interpretation requires these to be summarized at the scale at which freshwater plant diversity is recorded. The species richness grid (Section 2.1) serves as this analytical unit: each cell carries a count of freshwater plant species (Fwplant_ri), and the goal of the per-cell processing step is to attach matching vegetation metrics to each cell for downstream comparison. Two parallel processing routines are implemented, one for rivers and one for lakes. The river case is described here in full as the running example; the lake case follows the same structure with lake polygons replacing river polylines as the spatial mask, and is referenced where its results appear in Section 6.
+
+For each grid cell containing freshwater plants (where `Fwplant_ri > 0`):
+
+#### Step 1: River Identification
+
+-   Identifies all river segments intersecting the grid cell
+-   Counts total segments and unique river systems
+-   Creates intersection geometry for precise spatial analysis
+
+#### Step 2: Vegetation Statistics Calculation
+
+For each cell, the following statistics are calculated:
+
+**General River Area Statistics:**
+
+-   `rv_ndavi_m` / `rv_ndvi_mn`: Mean vegetation index across all river areas
+
+-   `rv_ndavi_s` / `rv_ndvi_sd`: Standard deviation (variability measure)
+
+-   `water_prop`: Proportion of area classified as water
+
+**Water-Only Statistics:**
+
+-   `ndavi_wtr` / `ndvi_wtr`: Vegetation index exclusively within water-masked areas
+
+-   Uses pixels where water probability \> 50% for robust water classification
+
+**River System Metrics:**
+
+-   `n_segments`: Total number of river segments in the cell
+
+-   `n_rivers`: Number of unique river systems (accounts for river continuity)
+
+**Notes:** The rationale for computing both water-masked and unmasked statistics, and the justification for the 50% threshold, are developed in Section 4. The full implementation of this per-cell processing, including the integration of the water mask into the reduction logic, is presented in Section 4.2.
+
+## **4. Water Masking for Mixed Pixel Management**
+
+### 4.1 The Mixed Pixel Challenge
+
+At 500m resolution, a fundamental challenge emerges: **mixed pixels**. Each 500m pixel covers approximately 35 soccer fields, in which typically contains a heterogeneous mixture of:
+
+-   Open water
+
+-   Riparian vegetation
+
+-   Agricultural fields or forest adjacent to rivers
+
+-   Exposed sediment bars
+
+-   Urban infrastructure near waterways
+
+Without proper water masking, vegetation indices from these mixed pixels remain an ambiguous combination of terrestrial and aquatic signals.
+
+### 4.2 How Water Masking Solves the Mixed Pixel Problem?
+
+This workflow uses water masking that transforms the mixed pixel issue into quantifiable water fractions:
+
+#### High-Resolution Binary Classification (250m)
+
+The MODIS MOD44W water mask starts at 250m resolution with binary values:
+
+-   0 = Land pixel
+
+-   1 = Water pixel
+
+#### Resolution Reduction Creates Water Fractions (500m)
+
+When reducing resolution using `ee$Reducer$mean()`, each 500m pixel aggregates four 250m pixels:
+
+```         
+Example transformation:
+250m pixels:        500m pixel:
+┌─────┐
+│ 0 1 │            
+│ 1 1 │     →      0.75 (75% water)
+└─────┘
+
+This means: (0+1+1+1)/4 = 0.75
+```
+
+#### Conservative Threshold Application (\>50% water)
+
+The critical decision to use `water_mask_500m$gt(0.5)` allows us to only analyze pixels that are **predominantly water**:
+
+-   **Pixels with \>50% water**: Analyzed for aquatic vegetation (high confidence)
+-   **Pixels with ≤50% water**: Excluded from water-specific analysis (likely dominated by terrestrial signals)
+
+This conservative approach ensures that the `ndavi_wtr` and `ndvi_wtr` metrics truly represent aquatic vegetation rather than near-shore vegetation broadly.
+
+This water fraction layer also provides the `water_prop` statistic reported per cell, calculated as the mean of all water fraction values within the sampled river or lake area. This value quantifies how water-dominated each cell is, independently of the vegetation signal, and supports interpretation of the NDVI and NDAVI outputs.
+
+#### **Example code**
+
+> The `calculate_river_ndvi_richness` function implements the per-cell processing described in Section 3.3 together with the water masking logic developed in Section 4.2. For each grid cell containing at least one recorded freshwater plant species, it computes two NDVI summaries (one across all river pixels, one restricted to water-dominant pixels), the `water_prop` cell statistic, and two separate counts of river segments and unique rivers. All computations are executed within Google Earth Engine.
+
+```{r}
+calculate_river_ndvi_richness <- function(year = 2024) {
+  
+  # Step 1: Build the annual NDVI composite for the target year
+  annual_ndvi <- calculate_ndvi(paste0(year, '-01-01'),
+                                paste0(year, '-12-31'))
+  
+  # Step 2: Resample the 250 m water mask to 500 m water fraction
+  water_mask_500m <- water_mask$
+    reduceResolution(reducer = ee$Reducer$mean(), maxPixels = 20)$
+    reproject(crs = "EPSG:4326", scale = 500)
+  
+  # Step 3: Stack NDVI and water fraction as bands in a single image
+  combined <- annual_ndvi$addBands(water_mask_500m$rename('water_mask'))
+  
+  # Step 4: Retain only richness cells with at least one species recorded
+  richness_with_species <- richness_ee$filter(ee$Filter$gt("Fwplant_ri", 0))
+  
+  # Step 5: Map over each cell, using rivers as the spatial mask
+  results <- richness_with_species$map(function(cell) {
+    
+    # Identify river segments intersecting the cell
+    rivers_in_cell  <- rivers_ee$filterBounds(cell$geometry())
+    rivers_geometry <- rivers_in_cell$geometry()$intersection(cell$geometry())
+    
+    # Unmasked stats: mean and standard deviation across all river pixels
+    stats <- combined$reduceRegion(
+      reducer    = ee$Reducer$mean()$combine(ee$Reducer$stdDev(), "", TRUE),
+      geometry   = rivers_geometry,
+      scale      = 500,
+      maxPixels  = 1e7,
+      tileScale  = 8,
+      bestEffort = TRUE
+    )
+    
+    # Masked stats: mean NDVI only over water-dominant pixels (>50% water)
+    water_only  <- combined$updateMask(water_mask_500m$gt(0.5))
+    water_stats <- water_only$select('NDVI')$reduceRegion(
+      reducer    = ee$Reducer$mean(),
+      geometry   = rivers_geometry,
+      scale      = 500,
+      maxPixels  = 1e7,
+      tileScale  = 8,
+      bestEffort = TRUE
+    )
+    
+    # Count both segments and unique rivers
+    n_segments      <- rivers_in_cell$size()
+    n_unique_rivers <- rivers_in_cell$aggregate_count_distinct('MAIN_RIV')
+    
+    # Attach computed statistics back to the cell
+    return(cell$
+             set('rv_ndvi_mn', stats$get('NDVI_mean'))$
+             set('rv_ndvi_sd', stats$get('NDVI_stdDev'))$
+             set('water_prop', stats$get('water_mask_mean'))$
+             set('ndvi_wtr',   water_stats$get('NDVI'))$
+             set('n_segments', n_segments)$
+             set('n_rivers',   n_unique_rivers))
+  })
+  
+  return(results)
+}
+```
+
+**Notes:**
+
+This function implements several parameters ensuring robust processing:
+
+``` r
+scale = 500          # Consistent 500m resolution
+maxPixels = 1e7      # Allows processing of large areas
+tileScale = 8        # Optimizes memory usage for large computations
+bestEffort = TRUE    # Ensures completion even with partial data
+```
+
+Global-scale reductions can exceed Earth Engine's default memory budget per worker. Setting `tileScale = 8` splits each computation into smaller tiles that fit within the limit. Setting `bestEffort = TRUE` lets Earth Engine coarsen the resolution rather than fail when a tile is still too large. The tradeoff is a small loss in precision for the largest cells, accepted in exchange for complete global coverage.
+
+### 4.3 Other Methods Attempted and Why Did They Fail?
+
+#### Failed Approach 1: No Water Masking
+
+**Problem**: Without water masking, vegetation indices in river systems capture a mixture of:
+
+-   Healthy riparian forest (high NDVI)
+
+-   Agricultural crops near rivers (variable NDVI)
+
+-   True aquatic vegetation (moderate NDVI)
+
+-   Algae and phytoplankton (low but positive NDVI)
+
+Also, freshwater plants are classified into many classes. Using only NDVI or NDAVI without water proportion context prevents understanding whether low vegetation signals indicate:
+
+-   Sparse aquatic vegetation in clear water
+
+-   Deep water where vegetation signals are undetected
+
+-   Seasonal vegetation absence
+
+**Result**: Unable to distinguish aquatic macrophytes from terrestrial vegetation, making ecological interpretation impossible.
+
+#### Failed Approach 2: Binary Classification at Coarse Resolution
+
+**Problem**: Simply classifying 500m pixels as "water" or "land" leads to significant data loss. Therefore, we need to consider partial water coverage.
+
+**Result**: A pixel that contains 45% water (even though it contains important river habitat) would be classified as "land" and completely excluded from analysis.
+
+#### Failed Approach 3: Using Finer Resolution Without Aggregation
+
+**Problem**: While 30m resolution from Sentinel-2 could theoretically resolve mixed pixel issue due to the high resolution, this approach fails because:
+
+-   Computationally expensive for continental scales
+
+-   Increased cloud contamination in smaller pixels
+
+-   Mismatch with ecological data resolution (species richness grids are at larger scales)
+
+-   Potential excessive noise from small-scale variations
+
+## **5. Output Data Structure**
+
+### 5.1 Export Format
+
+Results are exported as shapefiles containing:
+
+```{r}
+# Load pre-computed validation results
+load("validation_reports.RData")
+```
+
+```{r}
+library(pointblank)
+library(dplyr)
+river_ndvi_dictionary %>% get_informant_report(title = "Global Rivers NDVI Dataset Documentation")
+river_ndavi_dictionary %>% get_informant_report(title = "Global Rivers NDAVI Dataset Documentation")
+lake_ndvi_dictionary %>% get_informant_report(title = "Global Lakes NDVI Dataset Documentation")
+lake_ndavi_dictionary %>% get_informant_report(title = "Global Lakes NDAVI Dataset Documentation")
+```
+
+## **6. Results**
+
+```{r}
+# Load required packages
+library(rgee)
+library(sf)
+library(stars)
+library(dplyr)
+library(rnaturalearth)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+```
+
+```{r}
+# Load datasets
+river_ndvi <- st_read("water_mask_river_ndvi_sr_2024")
+river_ndavi <- st_read("water_mask_river_ndavi_sr_2024")
+lake_ndvi <- st_read("water_mask_lake_ndvi_sr_2024")
+lake_ndavi <- st_read("water_mask_lake_ndavi_sr_2024")
+
+# Load world boundaries for continental classification
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world_regions <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  select(continent, subregion)
+```
+
+### 6.1 Global Maps
+
+```{r}
+# Lake NDVI map
+ggplot() +
+  # First layer: world map
+  geom_sf(data = world, fill = "lightgray", color = "white", size = 0.1) +
+  # Second layer: lake NDVI
+  geom_sf(data = lake_ndvi %>% filter(!is.na(ndvi_wtr)), 
+          aes(color = ndvi_wtr), size = 0.8) +
+  scale_color_gradient(low = "white", high = "#228B22", 
+                       name = " Annual mean NDAVI", limits = c(-0.2, 0.8)) +
+  theme_minimal() +
+  labs(title = "Global Lake NDVI Distribution within Freshwater Species Richness Grid (with water mask)")
+```
+
+```{r}
+# Lake NDAVI map
+ggplot() +
+  # First layer: world map
+  geom_sf(data = world, fill = "lightgray", color = "white", size = 0.1) +
+  # Second layer: lake NDAVI
+  geom_sf(data = lake_ndavi %>% filter(!is.na(ndavi_wtr)), 
+          aes(color = ndavi_wtr), size = 1) +
+  scale_color_gradient(
+    low = "white",
+    high = "#228B22",
+    name = "Annual mean NDAVI"
+  ) +
+  theme_minimal() +
+  labs(title = "Global Lake NDAVI Distribution within Freshwater Species Richness Grid (with water mask)")
+
+```
+
+```{r}
+# River NDVI map
+ggplot() +
+  # First layer: world map
+  geom_sf(data = world, fill = "lightgray", color = "white", size = 0.1) +
+  # Second layer: river NDVI
+  geom_sf(data = river_ndvi %>% filter(!is.na(ndvi_wtr)), 
+          aes(color = ndvi_wtr), size = 1) +
+  scale_color_gradient(low = "white", high = "#228B22", 
+                       name = "Annual mean NDVI", limits = c(-0.2, 0.8)) +
+  theme_minimal() +
+  labs(title = "Global River NDVI Distribution within Freshwater Species Richness Grid (with water mask)")
+
+```
+
+```{r}
+# River NDAVI map
+ggplot() +
+  # First layer: world map
+  geom_sf(data = world, fill = "lightgray", color = "white", size = 0.1) +
+  # Second layer: river NDAVI
+  geom_sf(data = river_ndavi %>% filter(!is.na(ndavi_wtr)),
+                                        aes(color = ndavi_wtr), size = 1) +
+  scale_color_gradient(
+    low = "white",
+    high = "#228B22",
+    name = "Annual mean NDAVI"
+  ) +
+  theme_minimal() +
+  labs(title = "Global River NDAVI Distribution within Freshwater Species Richness Grid (with water mask)")
+
+```
+
+### 6.2 Lake Vegetation Indices by Continent
+
+```{r}
+# Calculate continental summaries for lakes
+lake_ndvi_continents <- lake_ndvi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  group_by(continent) %>%
+  summarise(
+    mean_ndvi_water = mean(ndvi_wtr, na.rm = TRUE),
+    median_ndvi_water = median(ndvi_wtr, na.rm = TRUE),
+    mean_ndvi = mean(lk_ndvi_mn, na.rm = TRUE),
+    median_ndvi = median(lk_ndvi_mn, na.rm = TRUE),
+    sd_ndvi = sd(lk_ndvi_mn, na.rm = TRUE),
+    total_lakes = sum(n_lakes, na.rm = TRUE),
+    n_cells = n(),
+    .groups = 'drop'
+  ) %>%
+  filter(continent != "Seven seas (open ocean)")
+
+# Transform to long format for plotting
+lake_ndvi_long <- lake_ndvi_continents %>%
+  pivot_longer(
+    cols = c(mean_ndvi_water, mean_ndvi, median_ndvi_water, median_ndvi),
+    names_to = "metric_type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    stat_type = case_when(
+      str_detect(metric_type, "mean") ~ "Mean",
+      str_detect(metric_type, "median") ~ "Median"
+    ),
+    water_mask = case_when(
+      str_detect(metric_type, "_water") ~ "With Water Mask",
+      TRUE ~ "Without Water Mask"
+    ),
+    facet_label = paste(stat_type, "-", water_mask)
+  )
+
+# Order continents by mean NDVI with water mask
+continent_order <- lake_ndvi_continents %>%
+  group_by(continent) %>%
+  arrange(desc(mean_ndvi_water)) %>%
+  pull(continent)
+
+
+# Create bar plot
+lake_ndvi_long %>%
+  mutate(continent = factor(continent, levels = continent_order)) %>%
+  ggplot(aes(x = continent, y = value)) +
+  geom_bar(stat = "identity", fill = "#5c89cc") +
+  facet_wrap(~ facet_label, scales = "free_y") +
+  labs(
+    title = "Annual Lake NDVI by Continent",
+    subtitle = "Continents ordered by mean Lake NDVI with water mask",
+    x = "Continent",
+    y = "Lake NDVI Value"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+# Calculate continental summaries for lake NDAVI
+lake_ndavi_continents <- lake_ndavi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  group_by(continent) %>%
+  summarise(
+    mean_ndavi_water = mean(ndavi_wtr, na.rm = TRUE),
+    median_ndavi_water = median(ndavi_wtr, na.rm = TRUE),
+    mean_ndavi = mean(lk_ndavi_m, na.rm = TRUE),
+    median_ndavi = median(lk_ndavi_m, na.rm = TRUE),
+    sd_ndavi = sd(lk_ndavi_m, na.rm = TRUE),
+    total_lakes = sum(n_lakes, na.rm = TRUE),
+    n_cells = n(),
+    .groups = 'drop'
+  ) %>%
+  filter(continent != "Seven seas (open ocean)")
+
+# Transform to long format
+lake_ndavi_long <- lake_ndavi_continents %>%
+  pivot_longer(
+    cols = c(mean_ndavi_water, mean_ndavi, median_ndavi_water, median_ndavi),
+    names_to = "metric_type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    stat_type = case_when(
+      str_detect(metric_type, "mean") ~ "Mean",
+      str_detect(metric_type, "median") ~ "Median"
+    ),
+    water_mask = case_when(
+      str_detect(metric_type, "_water") ~ "With Water Mask",
+      TRUE ~ "Without Water Mask"
+    ),
+    facet_label = paste(stat_type, "-", water_mask)
+  )
+
+# Order continents
+continent_order_ndavi <- lake_ndavi_continents %>%
+  arrange(desc(mean_ndavi_water)) %>%
+  pull(continent)
+
+# Create bar plot
+lake_ndavi_long %>%
+  mutate(continent = factor(continent, levels = continent_order_ndavi)) %>%
+  ggplot(aes(x = continent, y = value)) +
+  geom_bar(stat = "identity", fill = "#5c89cc") +
+  facet_wrap(~ facet_label, scales = "free_y") +
+  labs(
+    title = "Annual Lake NDAVI by Continent",
+    subtitle = "Continents ordered by mean NDAVI with water mask",
+    x = "Continent",
+    y = "Lake NDAVI Value"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### 6.3 River Vegetation Indices by Continent
+
+```{r}
+# Calculate continental summaries for rivers
+river_ndvi_continents <- river_ndvi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  group_by(continent) %>%
+  summarise(
+    mean_ndvi_water = mean(ndvi_wtr, na.rm = TRUE),
+    median_ndvi_water = median(ndvi_wtr, na.rm = TRUE),
+    mean_ndvi = mean(rv_ndvi_mn, na.rm = TRUE),
+    median_ndvi = median(rv_ndvi_mn, na.rm = TRUE),
+    sd_ndvi = sd(rv_ndvi_mn, na.rm = TRUE),
+    total_rivers = sum(n_rivers, na.rm = TRUE),
+    n_cells = n(),
+    .groups = 'drop'
+  ) %>%
+  filter(continent != "Seven seas (open ocean)")
+
+# Transform to long format
+river_ndvi_long <- river_ndvi_continents %>%
+  pivot_longer(
+    cols = c(mean_ndvi_water, mean_ndvi, median_ndvi_water, median_ndvi),
+    names_to = "metric_type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    stat_type = case_when(
+      str_detect(metric_type, "mean") ~ "Mean",
+      str_detect(metric_type, "median") ~ "Median"
+    ),
+    water_mask = case_when(
+      str_detect(metric_type, "_water") ~ "With Water Mask",
+      TRUE ~ "Without Water Mask"
+    ),
+    facet_label = paste(stat_type, "-", water_mask)
+  )
+
+# Order continents
+continent_order_river <- river_ndvi_continents %>%
+  arrange(desc(mean_ndvi_water)) %>%
+  pull(continent)
+
+# Create bar plot
+river_ndvi_long %>%
+  mutate(continent = factor(continent, levels = continent_order_river)) %>%
+  ggplot(aes(x = continent, y = value)) +
+  geom_bar(stat = "identity", fill = "#4d9966") +
+  facet_wrap(~ facet_label, scales = "free_y") +
+  labs(
+    title = "Annual River NDVI by Continent",
+    subtitle = "Continents ordered by mean River NDVI with water mask",
+    x = "Continent",
+    y = "River NDVI Value"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# Calculate continental summaries for river NDAVI
+river_ndavi_continents <- river_ndavi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  group_by(continent) %>%
+  summarise(
+    mean_ndavi_water = mean(ndavi_wtr, na.rm = TRUE),
+    median_ndavi_water = median(ndavi_wtr, na.rm = TRUE),
+    mean_ndavi = mean(rv_ndavi_m, na.rm = TRUE),
+    median_ndavi = median(rv_ndavi_m, na.rm = TRUE),
+    sd_ndavi = sd(rv_ndavi_m, na.rm = TRUE),
+    total_rivers = sum(n_rivers, na.rm = TRUE),
+    n_cells = n(),
+    .groups = 'drop'
+  ) %>%
+  filter(continent != "Seven seas (open ocean)")
+
+# Transform to long format
+river_ndavi_long <- river_ndavi_continents %>%
+  pivot_longer(
+    cols = c(mean_ndavi_water, mean_ndavi, median_ndavi_water, median_ndavi),
+    names_to = "metric_type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    stat_type = case_when(
+      str_detect(metric_type, "mean") ~ "Mean",
+      str_detect(metric_type, "median") ~ "Median"
+    ),
+    water_mask = case_when(
+      str_detect(metric_type, "_water") ~ "With Water Mask",
+      TRUE ~ "Without Water Mask"
+    ),
+    facet_label = paste(stat_type, "-", water_mask)
+  )
+
+# Order continents
+continent_order_river_ndavi <- river_ndavi_continents %>%
+  arrange(desc(mean_ndavi_water)) %>%
+  pull(continent)
+
+# Create bar plot
+river_ndavi_long %>%
+  mutate(continent = factor(continent, levels = continent_order_river_ndavi)) %>%
+  ggplot(aes(x = continent, y = value)) +
+  geom_bar(stat = "identity", fill ="#4d9966")+
+  facet_wrap(~ facet_label, scales = "free_y") +
+  labs(
+    title = "Annual River NDAVI by Continent",
+    subtitle = "Continents ordered by mean River NDAVI with water mask",
+    x = "Continent",
+    y = "River NDAVI Value"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### 6.4 Continental Distribution Patterns
+
+```{r}
+# Lake NDVI boxplot
+lake_ndvi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  filter(continent != "Seven seas (open ocean)") %>%
+  ggplot(aes(x = continent, y = ndvi_wtr)) +
+  geom_boxplot(fill = "lightblue") +
+  geom_jitter(alpha = 0.1, color = "darkblue", width = 0.2) +
+  labs(title = "A. Lake NDVI Distribution",
+       y = "NDVI (with water mask)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Lake NDAVI boxplot
+lake_ndavi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  filter(continent != "Seven seas (open ocean)") %>%
+  ggplot(aes(x = continent, y = ndavi_wtr)) +
+  geom_boxplot(fill = "lightblue") +  # Light blue fill for lakes
+  # Add individual points (slightly spread out to avoid overlap)
+  geom_jitter(alpha = 0.1, color = "darkblue", width = 0.2) +
+  labs(
+    title = "Lake NDAVI Distribution by Continent",
+    x = "Continent",
+    y = "Lake NDAVI (with water mask)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# River NDVI boxplot
+river_ndvi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  filter(continent != "Seven seas (open ocean)") %>%
+  ggplot(aes(x = continent, y = ndvi_wtr)) +
+  geom_boxplot(fill = "lightgreen") +
+  geom_jitter(alpha = 0.1, color = "darkgreen", width = 0.2) +
+  labs(title = "River NDVI Distribution by Continent",
+       y = "NDVI (with water mask)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# River NDAVI boxplot
+river_ndavi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  filter(continent != "Seven seas (open ocean)") %>%
+  ggplot(aes(x = continent, y = ndavi_wtr)) +
+  geom_boxplot(fill = "lightgreen") +
+  geom_jitter(alpha = 0.1, color = "darkgreen", width = 0.2) +
+  labs(title = "River NDAVI Distribution by Continent",
+       y = "NDVI (with water mask)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+
+```{r}
+lake_ndavi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  filter(continent != "Seven seas (open ocean)") %>%
+  ggplot(aes(x = lk_ndavi_m, y = ndavi_wtr)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +  # Add trend line
+  facet_wrap(~ continent, scales = "free") +
+  labs(
+    title = "NDAVI Comparison: Water Mask vs No Water Mask by Continent",
+    x = "Lake NDAVI (no water mask)",
+    y = "NDAVI (with water mask)"
+  ) +
+  theme_minimal()
+
+river_ndavi %>%
+  st_join(world_regions) %>%
+  st_drop_geometry() %>%
+  filter(continent != "Seven seas (open ocean)") %>%
+  ggplot(aes(x = rv_ndavi_m, y = ndavi_wtr)) +
+  geom_point(alpha = 0.5) +
+  # Add trend line
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  # Separate panel for each continent
+  facet_wrap(~ continent, scales = "free") +
+  labs(
+    title = "River NDVI Comparison: Water Mask vs No Water Mask by Continent",
+    x = "River NDAVI (no water mask)",
+    y = "River NDAVI (with water mask)"
+  ) +
+  theme_minimal()
+```
+
+### 6.5 Interpretation
+
+At the continental level, South America consistently ranks first across indices (NDVI and NDAVI), systems (rivers and lakes), and parameters (mean and median), suggesting both more productive riparian zones and more aquatic vegetation than other continents. This finding aligns with the climate in South America where year-round growing conditions and abundant moisture converge, creating optimal environments for sustained aquatic vegetation productivity.
+
+However, the ranking shifts in parameters between NDVI and NDAVI and from masked to unmasked data reveal somewhat interesting patterns that reveal different aspects of continental aquatic vegetation dynamics. While Europe and Aisa maintain relatively high NDVI in their river systems, its ranking drops notably in NDAVI, suggesting that the apparent vegetation productivity in these continents may be inflated by terrestrial vegetation contributions rather than true aquatic macrophyte abundance.
+
+Oceania shows the opposite pattern, maintaining relatively strong aquatic vegetation signals in both vegetation indices that might reflect extensive wetland systems where genuine aquatic vegetation dominates rather than mixed pixels. Africa, in particular, moves up markedly without the mask, which likely reflects the continent's diverse freshwater ecosystems ranging from highly productive tropical systems to more arid-adapted riverine vegetation.
+
+North America consistently shows lower values across both vegetation indices in lake systems. This suggests that temperate and boreal freshwater systems, despite their increased abundance during growing seasons, actually maintain lower annual vegetation productivity due to seasonal dormancy and shorter growing periods compared to tropical systems.
+
+The scatter plots show that masked and unmasked index values are strongly linearly related, especially for lake vegetation index values which show a more correlated relationship than rivers. This clarifies why lake rankings change less than river rankings across different analytical approaches. However, the unmasked values, such as NDVI and for rivers, the values are higher because shoreline and adjacent land vegetation can result in mixed pixels that inflate apparent aquatic productivity. Therefore, the inflation is much weaker for NDAVI than for NDVI, consistent with NDAVI being more selective for aquatic macrophytes and NDVI being dominated by terrestrial greenness near water. With water masking, medians often exceed means, implying left-skew from many low or negative open-water pixels pulling the mean down. Therefore, medians are the more appropriate continental summary, providing more reliable estimates.
+
+However, any ranking changes need to be interpreted with caution as they likely reflect pixel mixing and skew, not clear ecological ordering among continents. The underlying Major Habitat Type (MHT) composition within each continent adds another layer of complexity to these patterns. For instance, continental rankings may shift not because of inherent productivity differences, but because continents differ in their relative habitat types that respond differently to pixel mixing. Europe's dominance of "Temperate floodplain rivers and wetlands" versus South America's "Tropical and subtropical floodplain rivers and wetlands" means that apparent ranking changes between these continents might reflect habitat-specific responses to pixel mixing issue rather than true productivity differences. Therefore, continental comparisons only provide a quick idea of what data looks like and help us see if data makes sense. They likely reflect the interaction between pixel mixing effects and the underlying distribution of major habitat types rather than clear biome-scale differences in ecological productivity. Future habitat-stratified analyses would be needed to disentangle true productivity signals from methodological uncertainties across these diverse freshwater ecosystem habitat types.
+
+## **7. Validation Reports**
+
+```{r}
+river_ndvi_report
+river_ndavi_report
+```
+
+```{r}
+lake_ndvi_report
+
+lake_ndavi_report
+```
+
+Grid cells flagged during the validation process can be downloaded as a CSV file for detailed investigation. The majority of flagged cells contain NULL values due to the absence of water bodies within the grid cell. However, some unexpected cases were identified where grid cells contain abundant freshwater plants and detected water bodies but fail to register in the water mask analysis. For example, Grid cell 353 has high species richness (101 species) and contains 6 detected lakes, yet produces no water mask index values.
+
+```{r}
+
+# Coordinates of Grid cell 353
+coords <- lake_ndvi[[13]][[221]][[1]]
+lake_poly <- st_polygon(list(coords))
+lake_sf <- st_sfc(lake_poly, crs = 4326)
+lake_df <- st_sf(name = "Lake", geometry = lake_sf)
+
+# Get New Zealand map
+world <- ne_countries(scale = "medium", returnclass = "sf")
+nz <- world[world$name == "New Zealand",]
+
+# VERY ZOOMED IN map with translucent colors
+ggplot() +
+  geom_sf(data = nz, fill = "lightgray", color = "white", size = 0.3) +
+  geom_sf(data = lake_df, 
+          fill = alpha("blue", 0.4),
+          size = 1.5) +
+  # TIGHT zoom around your lake
+  coord_sf(xlim = c(min(coords[,1]) - 0.05, max(coords[,1]) + 0.05), 
+           ylim = c(min(coords[,2]) - 0.05, max(coords[,2]) + 0.05)) +
+  theme_minimal() +
+  labs(title = "Grid cell 353",
+       x = "Longitude", y = "Latitude") +
+  theme(panel.grid = element_line(color = "gray90", size = 0.3))
+
+```
+
+The grid cell 353 is plotted, however, there are no actual lake geometries. The lakes are probably smaller features within the grid cell.
