@@ -75,7 +75,7 @@ This workflow generates global maps of:
 
 These outputs are summarized spatially within freshwater plant species richness grid cells and can be used for ecological interpretation and further modelling.
 
-figures/example_map.png
+![Lake NDVI map](figures/lake_ndvi_map.png)
 
 ## Tools and packages
 
