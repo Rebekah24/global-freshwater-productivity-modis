@@ -2,7 +2,7 @@
 
 This repository presents a geospatial workflow for estimating freshwater vegetation productivity in global river and lake systems using satellite-derived vegetation indices. The project computes annual **NDVI** and **NDAVI** from **MODIS MCD43A4** reflectance data, integrates these indices with global hydrographic and freshwater plant species richness layers in **Google Earth Engine**, and produces spatially explicit productivity metrics at **500 m resolution**.
 
-A central methodological contribution of this workflow is the use of **water masking** to address the **mixed-pixel problem** in moderate-resolution satellite imagery. By restricting water-specific summaries to pixels that are predominantly water, the workflow improves the ecological interpretability of vegetation signals in aquatic environments.
+A key methodological contribution of this workflow is the use of **water masking** to address the **mixed-pixel problem** in moderate-resolution satellite imagery. By restricting water-specific summaries to pixels that are predominantly water, the workflow improves the ecological interpretability of vegetation signals in aquatic environments.
 
 ## Live HTML report
 [Open the workflow report here](<https://rebekah24.github.io/global-freshwater-productivity-modis/>)
@@ -112,8 +112,6 @@ Some original datasets or intermediate objects may not be included in this repos
 ## Future improvements
 
 Potential next steps for this workflow include:
-
-- extending the analysis across multiple years
 - comparing masked and unmasked productivity metrics quantitatively
 - integrating additional environmental covariates
 - linking productivity patterns more directly to species richness modelling
