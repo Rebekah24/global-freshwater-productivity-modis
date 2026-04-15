@@ -4,6 +4,9 @@ This repository presents a geospatial workflow for estimating freshwater vegetat
 
 A central methodological contribution of this workflow is the use of **water masking** to address the **mixed-pixel problem** in moderate-resolution satellite imagery. By restricting water-specific summaries to pixels that are predominantly water, the workflow improves the ecological interpretability of vegetation signals in aquatic environments.
 
+## Live HTML report
+[Open the workflow report here](<https://rebekah24.github.io/global-freshwater-productivity-modis/>)
+
 ## Project overview
 
 Freshwater vegetation is an important indicator of ecosystem condition and biodiversity. This workflow was developed to generate annual productivity metrics for rivers and lakes at global scale, with outputs designed for downstream ecological analysis of the productivity–species richness relationship in freshwater systems.
